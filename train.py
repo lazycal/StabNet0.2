@@ -1,6 +1,6 @@
 import time
 from options import Options
-from data_loader import create_data_loader, Data, map_data
+from data_loader import create_data_loader, Data, map_data, create_empty_data
 from util.util import AverageMeter, DictAverageMeter
 from util import util
 from models import models
@@ -14,11 +14,16 @@ import numpy as np
 import cv2
 import sys
 import tensorboard_logger as tl
+import torch.nn.functional as F
 
 def to_gray(x):
     return x[:, 0, :, :] * 0.299 + x[:, 1, :, :] * 0.587 + x[:, 2, :, :] * 0.114
 
-def visualize(data, warpped, global_step, sid, opt, mode='both', name=''):
+def draw_flow(warpped1, warpped2, flow):
+    warpped_target = F.grid_sample(warpped2, flow).data
+    return torch.abs(warpped_target - warpped1)
+
+def visualize(data2, output2, global_step, sid, opt, output1=None, flow=None, mode='both', name=''):
 
     def draw(img, pts, mask, color=None):
         res = img.copy()
@@ -31,31 +36,44 @@ def visualize(data, warpped, global_step, sid, opt, mode='both', name=''):
             if not mask[i]: continue
             cv2.circle(res, tuple(pts[i]), 5, tuple(np.random.rand(3)) if color is None else color)
         return res
-
-    prefix = util.train2show(torch.stack(list(map(lambda x: x[sid], data.prefix)), dim=0).data)
-    unstable = util.train2show(torch.stack(list(map(lambda x: x[sid], data.unstable)), dim=0).data)
-    target = util.train2show(torch.stack(list(map(lambda x: x[sid], data.target)), dim=0).data)
-    warpped = util.train2show(torch.stack(list(map(lambda x: x[sid], warpped)), dim=0).data)
-    diff = torch.abs(warpped - target)
+    warpped2 = output2.warpped
+    mask2 = output2.mask
+    prefix = util.train2show(torch.stack(list(map(lambda x: x[sid], data2.prefix)), dim=0).data)
+    unstable = util.train2show(torch.stack(list(map(lambda x: x[sid], data2.unstable)), dim=0).data)
+    target = util.train2show(torch.stack(list(map(lambda x: x[sid], data2.target)), dim=0).data)
+    warpped2 = util.train2show(torch.stack(list(map(lambda x: x[sid], warpped2)), dim=0).data)
+    mask2 = (torch.stack(list(map(lambda x: x[sid], mask2)), dim=0).data > .9).float()
+    if flow is not None: 
+        warpped1 = output1.warpped
+        warpped1 = util.train2show(torch.stack(list(map(lambda x: x[sid], warpped1)), dim=0).data)
+        flow = torch.stack(list(map(lambda x: x[sid], flow)), dim=0).data
+        diff_flow = draw_flow(warpped1, warpped2, flow)
+    diff = torch.abs(warpped2 - target)
     diff = to_gray(diff)
     diff = torch.stack([diff, diff, diff], dim=1)
-    fm = list(map(lambda x: x.data, data.fm))
-    fm_mask = list(map(lambda x: x.data, data.fm_mask))
+    fm = list(map(lambda x: x.data, data2.fm))
+    fm_mask = list(map(lambda x: x.data, data2.fm_mask))
     for i in range(len(fm)):
         pts = fm[i][sid].cpu().numpy()
-        mask = fm_mask[i][sid].cpu().numpy()
+        a_fm_mask = fm_mask[i][sid].cpu().numpy()
         img = target[i].cpu().numpy().transpose([1, 2, 0])
-        # print(img.shape, pts.shape, mask.shape)
-        # print('mask={}'.format(mask))
-        img = draw(img, pts[:, :2], mask) # stable
+        # print(img.shape, pts.shape, a_fm_mask.shape)
+        # print('a_fm_mask={}'.format(a_fm_mask))
+        img = draw(img, pts[:, :2], a_fm_mask) # stable
         target[i].copy_(torch.from_numpy(img.transpose([2, 0, 1])))
         img = unstable[i].cpu().numpy().transpose([1, 2, 0])
-        img = draw(img, pts[:, 2:], mask) # unstable
+        img = draw(img, pts[:, 2:], a_fm_mask) # unstable
         unstable[i].copy_(torch.from_numpy(img.transpose([2, 0, 1])))
-    vis = torch.cat(
-        (unstable, warpped, target, diff),
-        dim=0
-    )
+    if flow is not None:
+        vis = torch.cat(
+            (unstable, warpped2, target, diff, diff_flow),
+            dim=0
+        )
+    else:
+        vis = torch.cat(
+            (unstable, warpped2, target, diff),
+            dim=0
+        )
     expr_dir = os.path.join(opt.checkpoints_dir, opt.name)
     prefix_grid = torchvision.utils.make_grid(prefix, nrow=1)
     vis_grid = torchvision.utils.make_grid(vis, nrow=vis.shape[0] // 4)
@@ -64,12 +82,15 @@ def visualize(data, warpped, global_step, sid, opt, mode='both', name=''):
         torchvision.utils.save_image(prefix, 
             os.path.join(expr_dir, name + 'prefix-{:0>4}-{:0>3}.png'.format(global_step, sid)), nrow=1)
         torchvision.utils.save_image(vis, 
-            os.path.join(expr_dir, name + 'input-output-target-{:0>4}-{:0>3}.png'.format(global_step, sid)), nrow=vis.shape[0] // 4)
+            os.path.join(expr_dir, name + 'input-output-target{:0>4}-{:0>3}.png'.format(global_step, sid)), nrow=vis.shape[0] // 4)
     if name != '': name = name[:-1] + '/'
     if mode == 'both' or mode == 'log':
         tl.log_images(name + 'prefix/{}'.format(sid), [prefix_grid.cpu().numpy()], step=global_step)
         tl.log_images(name + 'input-output-target/{}'.format(sid), [vis_grid.cpu().numpy()], step=global_step)
         tl.log_images(name + 'diff/{}'.format(sid), diff[:, 0, ...].cpu().numpy(), step=global_step)
+        tl.log_images(name + 'mask/{}'.format(sid), mask2[:, 0, ...].cpu().numpy(), step=global_step)
+        if flow is not None:
+            tl.log_images(name + 'flow-diff/{}'.format(sid), diff_flow[:, 0, ...].cpu().numpy(), step=global_step)
 
 def train(epoch):
     global global_step, criterion
@@ -79,9 +100,10 @@ def train(epoch):
 
     # switch to train mode
     model.train()
-
     end = time.time()
+
     for i, data in enumerate(train_dataloader):
+        criterion.id_loss_weight = 0 if global_step >= opt.id_loss_step else opt.id_loss_weight
         # measure data loading time
         if opt.gpu_ids:
             data = map_data(lambda x: Variable(x.cuda()), data)
@@ -89,9 +111,20 @@ def train(epoch):
             data = map_data(lambda x: Variable(x), data)
 
         data_time.update(time.time() - end)
-        data = Data(*data)
-        output = model.forward(data)
-        loss = criterion(output, data)
+        data1 = {}
+        data2 = {}
+        data = data._asdict()
+        for class_name in ['prefix', 'unstable', 'target', 'fm', 'fm_mask']:
+            size = len(data[class_name]) // 2
+            data1[class_name] = data[class_name][:size]
+            data2[class_name] = data[class_name][size:]
+          
+        data = Data(**data)
+        data1 = Data(**data1, flow=[])
+        data2 = Data(**data2, flow=[])
+        output1 = model.forward(data1)
+        output2 = model.forward(data2)
+        loss = criterion(output1, output2, data.flow, data1, data2)
         # measure accuracy and record loss
         losses.update(loss.data[0], opt.batch_size)
 
@@ -107,7 +140,10 @@ def train(epoch):
             all_loss = criterion.summary()
             util.diagnose_network(model.cnn)
             util.diagnose_network(model.fc_loc)
-            visualize(data, output.warpped, global_step, 0, opt, mode='save', name='train')
+            visualize(data2, output2, global_step, 0, opt, output1, data.flow, 
+                mode='save', name='train2')
+            visualize(data1, output1, global_step, 0, opt,
+                mode='save', name='train1')
             
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -127,15 +163,14 @@ def train(epoch):
             for k, v in all_loss.items():
                 tl.log_value('train/loss/' + k, v, global_step)
             for sid in range(data.fm[0].shape[0]):
-                visualize(data, output.warpped, global_step, sid, opt, mode='log', name='train')
+                visualize(data2, output2, global_step, sid, opt, output1, data.flow,
+                    mode='log', name='train2')
+                visualize(data1, output1, global_step, sid, opt,
+                    mode='log', name='train1')
         
         if (global_step + 1) % opt.val_freq == 0:
             validate(epoch)
             validate(epoch, False)
-
-        # if global_step == 500:
-        #     opt.id_loss_weight = 0
-        #     criterion = sys.modules['loss'].Loss(opt)
 
         global_step += 1
         end = time.time()
@@ -159,11 +194,22 @@ def validate(epoch, isEval=True):
             data = map_data(lambda x: Variable(x.cuda(), volatile=True), data)
         else:
             data = map_data(lambda x: Variable(x, volatile=True), data)
-        data = Data(*data)
+
         data_time.update(time.time() - end)
-        output = model.forward(data)
-        warpped = output.warpped
-        loss = criterion(output, data)
+        data1 = {}
+        data2 = {}
+        data = data._asdict()
+        for class_name in ['prefix', 'unstable', 'target', 'fm', 'fm_mask']:
+            size = len(data[class_name]) // 2
+            data1[class_name] = data[class_name][:size]
+            data2[class_name] = data[class_name][size:]
+          
+        data = Data(**data)
+        data1 = Data(**data1, flow=[])
+        data2 = Data(**data2, flow=[])
+        output1 = model.forward(data1)
+        output2 = model.forward(data2)
+        loss = criterion(output1, output2, data.flow, data1, data2)
 
         # measure accuracy and record loss
         losses.update(loss.data[0], opt.batch_size)
@@ -176,7 +222,10 @@ def validate(epoch, isEval=True):
             'ALl Loss {all_loss}'.format(
             epoch, time.time() - end, loss=losses, all_loss=all_loss, evalStr=evalStr))
     for sid in range(data.fm[0].shape[0]):
-        visualize(data, warpped, global_step, sid, opt, mode='both', name='{}val'.format(evalStr))
+        visualize(data2, output2, global_step, sid, opt, output1, data.flow,
+            mode='both', name='{}val2'.format(evalStr))
+        visualize(data1, output1, global_step, sid, opt,
+            mode='both', name='{}val1'.format(evalStr))
     tl.log_value('{}val/Loss'.format(evalStr), losses.val, global_step)
     tl.log_value('{}val/Learning Rate'.format(evalStr), scheduler.get_lr()[0], global_step)
     # tl.log_value('val/Batch Time', batch_time.val, global_step)
@@ -250,7 +299,9 @@ def main():
         model.freeze_cnn(False)
         optimizer = torch.optim.Adam(model.parameters(), opt.lr)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, opt.decay_epochs, opt.lr_decay)
+        
     for epoch in range(start_epoch, opt.max_epoch):
+        criterion.temp_loss_weight = 0 if epoch < opt.temp_loss_epoch else opt.temp_loss_weight
         # TODO decay lr
         if epoch == opt.freeze_epochs:
             print('finetune enable')
@@ -274,39 +325,6 @@ def main():
                 'best_loss': best_loss,
                 # 'optimizer' : optimizer.state_dict(),
             }, False, expr_dir)
-        #     iter_start_time = time.time()
-        #     visualizer.reset()
-        #     total_steps += opt.batch_size
-        #     epoch_iter += opt.batch_size
-        #     model.set_input(data)
-        #     model.optimize_parameters()
-
-        #     if total_steps % opt.display_freq == 0:
-        #         save_result = total_steps % opt.update_html_freq == 0
-        #         visualizer.display_current_results(model.get_current_visuals(), epoch, save_result)
-
-        #     if total_steps % opt.print_freq == 0:
-        #         errors = model.get_current_errors()
-        #         t = (time.time() - iter_start_time) / opt.batch_size
-        #         visualizer.print_current_errors(epoch, epoch_iter, errors, t)
-        #         if opt.display_id > 0:
-        #             visualizer.plot_current_errors(epoch, float(epoch_iter)/dataset_size, opt, errors)
-
-        #     if total_steps % opt.save_latest_freq == 0:
-        #         print('saving the latest model (epoch %d, total_steps %d)' %
-        #               (epoch, total_steps))
-        #         model.save('latest')
-
-        # if epoch % opt.save_epoch_freq == 0:
-        #     print('saving the model at the end of epoch %d, iters %d' %
-        #           (epoch, total_steps))
-        #     model.save('latest')
-        #     model.save(epoch)
-
-        # print('End of epoch %d / %d \t Time Taken: %d sec' %
-        #       (epoch, opt.niter + opt.niter_decay, time.time() - epoch_start_time))
-        # model.update_learning_rate()
-
 
 if __name__ == '__main__':
     main()

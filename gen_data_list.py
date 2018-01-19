@@ -36,7 +36,7 @@ def gen_samples(vid):
         frame_fm_list.append(os.path.join(vid, '{:04d}.mat'.format(i)))
     n = len(frame_list)
     res = []
-    for i in range(args.prefix[-1], n - args.suffix[-1]):
+    for i in range(args.prefix[-1], n - args.suffix[-1] - 1):
         asample = create_empty_data()
         for p in args.prefix[::-1]:
             asample.prefix.append('stable/' + frame_list[i - p])
@@ -44,6 +44,13 @@ def gen_samples(vid):
             asample.unstable.append('unstable/' + frame_list[i + s])
             asample.target.append('stable/' + frame_list[i + s])
             asample.fm.append(frame_fm_list[i + s])
+
+        for p in args.prefix[::-1]:
+            asample.prefix.append('stable/' + frame_list[i - p + 1])
+        for s in args.suffix:
+            asample.unstable.append('unstable/' + frame_list[i + s + 1])
+            asample.target.append('stable/' + frame_list[i + s + 1])
+            asample.fm.append(frame_fm_list[i + s + 1])
         res.append(asample._asdict())
     return res
 

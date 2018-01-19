@@ -33,9 +33,12 @@ class Options(object):
         # self.parser.add_argument('--display_id', type=int, default=1, help='window id of the web display')
         # self.parser.add_argument('--display_port', type=int, default=8097, help='visdom port of the web display')
         # self.parser.add_argument('--no_dropout', action='store_true', help='no dropout')
-        self.parser.add_argument('--id_loss_weight', type=float, default=0.01, help='identity loss weight')
+        self.parser.add_argument('--id_loss_weight', type=float, default=0.1, help='identity loss weight')
+        self.parser.add_argument('--id_loss_step', type=float, default=1000, help='step to disable identity loss')
         self.parser.add_argument('--pix_loss_weight', type=float, default=1, help='pix_loss_weight')
         self.parser.add_argument('--feature_loss_weight', type=float, default=1, help='feature_loss_weight')        
+        self.parser.add_argument('--temp_loss_weight', type=float, default=1, help='temp_loss_weight')           
+        self.parser.add_argument('--temp_loss_epoch', type=float, default=0, help='epoch to enable temporal loss')        
         self.parser.add_argument('--pretrained', action='store_true', dest='pretrained', help='pretrained')          
         self.parser.add_argument('--no_pretrained', action='store_false', dest='pretrained', help='no pretrained')  
         self.parser.set_defaults(pretrained=True)    
@@ -67,10 +70,10 @@ class Options(object):
 
         self.initialized = True
 
-    def parse(self):
+    def parse(self, cmd=None):
         if not self.initialized:
             self.initialize()
-        self.opt = self.parser.parse_args()
+        self.opt = self.parser.parse_args(cmd)
 
         str_ids = self.opt.gpu_ids.split(',')
         self.opt.gpu_ids = []
